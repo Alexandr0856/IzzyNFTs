@@ -1,12 +1,18 @@
-import message_text
-import auth
-import logging as log
+import time
+import redis
+
+import pyrogram.types
 import sqlalchemy
-from pyrogram import Client, filters
+import message_text
+from auth import App
+import logging as log
+from pyrogram import filters
 from pyrogram.types import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from models import Base, Session, User, engine
 
-App = Client("IzzyNFTs", api_id=auth.API_ID, api_hash=auth.API_HASH, bot_token=auth.BOT_TOKEN)
+Base.metadata.create_all(engine)
+session = Session()
+session.commit()
 
 log.basicConfig(filename='app.log', format='%(asctime)s - %(message)s\n\n', level=log.INFO)
 
@@ -22,7 +28,7 @@ def start(client, message):
     try:
         session.commit()
         log.info(f'Connect new user: {user_info.username} - {user_info.id}')
-        message.reply(message_text.first_start, reply_markup=InlineKeyboardMarkup(
+        message.reply(message_text.first_start[0], reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton(
                 'Add new wallet',
                 callback_data='add_wallet'
@@ -30,39 +36,73 @@ def start(client, message):
         ))
 
     except sqlalchemy.exc.IntegrityError:
-        message.reply(message_text.second_start)
         log.info(f'Reconnect old user: {user_info.username} - {user_info.id}')
         session.rollback()
 
+        message.reply(message_text.second_start, reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(
+                    'Add new wallet',
+                    callback_data='add_wallet'
+                )],
+                [InlineKeyboardButton(
+                    'Menu',
+                    callback_data='main_menu'
+                )]
+            ]
+        ))
+
     except Exception as error:
+        print(error)
         log.error(error)
         session.rollback()
 
 
-@App.on_message(filters.command('db'))
+@App.on_message(filters.command('db') & filters.user(session.query(User).filter(User.admin == True).all()))
 def db_view(client, message):
-    user = session.query(User).filter(User.user_id == message.from_user.id).first()
-    if user.admin:
-        all_rows = session.query(User).all()
-        text = ''
-        for row in all_rows:
-            text += f'Name: {row.name}, Id: {row.user_id}, Admin: {row.admin}\n'
-        print(text)
-        message.reply(text)
-    else:
-        message.reply("I don't know this command")
+
+    all_rows = session.query(User).all()
+    text = ''
+    for row in all_rows:
+        text += f'Name: {row.name}, Id: {row.user_id}, Admin: {row.admin}\n'
+
+    message.reply(text)
 
 
 @App.on_callback_query()
-def add_wallet(client, query):
-    if query.data == 'add_wallet':
-        App.send_message(query.from_user.username, 'Please input your public key:')
-    else:
-        print(10)
+def on_callback(client, query):
+    match query.data:
+        case 'add_wallet':
+            add_wallet(query)
+        case 'confirm_wallet':
+            confirm_wallet(query)
+
+
+def add_wallet(query):
+    App.send_message(query.from_user.username, message_text.add_wallet, reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(
+                    'Confirm',
+                    callback_data='confirm_wallet'
+                )]
+            ]
+    ))
+
+
+def confirm_wallet(query):
+    with redis.Redis() as client:
+        wallet = client.hget('AddedWallet', query.from_user.id).decode()
+        client.hdel('AddedWallet', query.from_user.id)
+
+    App.send_message(query.from_user.username, message_text.added_wallet(wallet), reply_markup=InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(
+                'MainMenu',
+                callback_data='main_menu'
+            )]
+        ]
+    ))
 
 
 if __name__ == '__main__':
-    session = Session()
-    Base.metadata.create_all(engine)
-
     App.run()
